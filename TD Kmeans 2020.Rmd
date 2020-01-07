@@ -1,0 +1,232 @@
+---
+title: "Clustering KMeans avec R"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages à installer
+
+```{r packages, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(skimr)
+library(cluster)
+library(RColorBrewer)
+library(kableExtra)
+```
+
+# Lecture des données  
+Lecture d'un fichier csv avec le paramétrage suivant :  
+- séparateur de champ : ;  
+- séparateur de décimal : .  
+- lecture des chaines de caractères en tant que Strings et non Factors  
+
+```{r read_csv}
+fifa_data<-read.csv2("./fifa_sample.csv",
+                           sep=";",stringsAsFactors = FALSE,dec = ".")
+```
+
+On affiche le nombre d'individus/variables ainsi que les premières et dernières lignes.  
+```{r data_exploration}
+dim(fifa_data)
+fifa_data %>% head(5)
+fifa_data %>% tail(5)
+
+```
+
+# Exploration des données  
+## Visualisation synthétique  
+
+L'objectif est de disposer rapidement d'une synthèse statistiques de nos données : moyenne, écart_type, percentiles et histogrammes.  
+Nous voyons que la variable ID est identifiée comme numérique, il faudra en tenir compte lors de notre modélisation.
+Les variables ont des échelles différentes.  
+On constate que certaines colonnes ont des valeurs manquantes.  
+```{r data_synthesis}
+skimr::skim(fifa_data)
+```
+
+## Visualisation pour une variable donnée  
+Nous réalisons ici un graphe de distribution de la variable overall.  
+```{r dataviz_1,warning=FALSE}
+fifa_data %>% 
+  ggplot(aes(x = Overall, fill = factor(Overall))) +
+  geom_bar() + guides(fill = FALSE)+
+  labs(title="Player's Overall ")
+```
+
+Ce graphe croise les variables age et overall.  On observe un lien entre l'age et la note globale du joueur.  
+```{r dataviz_2,warning=FALSE}
+fifa_data %>% 
+  ggplot(aes(x = Age,y=Overall,alpha=0.5)) +
+  geom_point()  +
+  geom_smooth(method = "lm", se = FALSE)
+```
+
+La fonction suivante permet de réaliser des "pairwise" graphiques.  
+```{r dataviz_3}
+lattice::splom(fifa_data[2:5])
+```
+
+# Traitement préparatoire des données  
+
+## Remplacement des valeurs manquantes  par la moyenne
+On constate des valeurs manquantes sur deux variables : Age, Overall  
+```{r check_nas, warning=FALSE}
+fifa_data %>%
+  summarise_all(funs(sum(is.na(.)))) %>% glimpse
+```
+
+On créé un dataframe qui contient les valeurs des moyennes pour les variables étudiées.  
+```{r compute_mean}
+(mean.df<-fifa_data %>% 
+  select(Age,Overall) %>% 
+  summarize(Age_mean=round(mean(Age,na.rm=TRUE),0),
+            Overall_mean=round(mean(Overall,na.rm=TRUE),0))
+)
+```
+
+On remplace les valeurs manquantes dans le dataframe. 
+
+```{r nas_replace_by_mean}
+
+fifa_data.fillna<-fifa_data %>%
+  mutate(Age=ifelse(is.na(Age),mean.df$Age_mean,Age),
+         Overall=ifelse(is.na(Overall),mean.df$Overall_mean,Overall)
+         ) 
+```
+
+On vérifie le nombre de valeurs manquantes.  
+```{r nas_check}
+fifa_data.fillna %>%
+  summarise_all(funs(sum(is.na(.)))) %>% glimpse
+```
+
+## Scaling des variables   
+
+Le dataset n'ayant plus de valeurs manquantes, on peut procéder au scaling des données. 
+On ne sélectionne que les colonnes numériques `select_if(is.numeric)`.  On perd les variables `name`, `Club` et `groupPosition`.  
+
+```{r scaling_mean_std}
+
+fifa_data.numeric<-fifa_data.fillna %>% select_if(is.numeric) 
+fifa_data.fillna.scaled<-fifa_data.numeric  %>% 
+  scale( center = TRUE, scale = TRUE) %>%
+  as.data.frame
+
+fifa_data.numeric %>% select(1:4)%>% summary
+fifa_data.fillna.scaled %>% select(1:4) %>% summary
+```
+
+Autre possibilité de scaling : Min/Max scaling  (les valeurs seront comprises entre 0 et 1). On retiendra ce scaking des données pour notre kmeans.  
+
+```{r scaling minMax}
+normalize <- function(x) {
+    return ((x - min(x)) / (max(x) - min(x)))
+}
+
+fifa_data.scaled.minMax <- as.data.frame(lapply(fifa_data.numeric, normalize))
+fifa_data.scaled.minMax %>% select(1:5) %>% summary
+```
+
+# KMeans  
+On applique la kmeans sur le dataframe avec toutes les variables.  
+```{r df_for_kmeans}
+#on sélectionne le dataframe qu'on veut utiliser
+df.for.kmeans<-fifa_data.scaled.minMax
+```
+
+```{r kmeans_test}
+#on teste avec k = 3
+clusters <- kmeans(fifa_data.scaled.minMax, 3, nstart = 100)
+clusters$tot.withinss  # variance intra
+clusters$size          # taille des clusters
+```
+
+On cherche la bonne valeur de k avec la méthode du coude.  
+
+```{r elbow}
+#on créé une fonction qui retourne la variance intra pour une valeur de k
+kmean_withinss <- function(k) {
+  print(paste0("kmeans k:",k))
+  cluster <- kmeans(df.for.kmeans, k, nstart = 50)
+  return (cluster$tot.withinss)
+}
+# Set maximum cluster 
+max_k <-10
+# Run algorithm over a range of k 
+wss <- sapply(2:max_k, kmean_withinss)
+# Create a data frame to plot the graph
+elbow <-data.frame(2:max_k, wss)
+# Plot the graph with gglop
+ggplot(elbow, aes(x = X2.max_k, y = wss)) +
+  geom_point() +
+  geom_line() +
+  scale_x_continuous(breaks = seq(1, max_k, by = 1))
+```
+
+On cherche la bonne valeur de k avec la méthode de la silouhette.  
+```{r silhouette}
+# function to compute average silhouette for k clusters
+library(cluster)
+avg_sil <- function(k) {
+  print(paste0("silhouette k:",k))
+  km.res <- kmeans(df.for.kmeans, centers = k, nstart = 50)
+  ss <- silhouette(km.res$cluster, dist(df.for.kmeans))
+  return(mean(ss[, 3]))
+}
+# Set maximum cluster 
+max_k <-10
+
+# Run algorithm over a range of k 
+avg.silhouette <- sapply(2:max_k, avg_sil)
+# Create a data frame to plot the graph
+silhouette <-data.frame(2:max_k, avg.silhouette)
+# Plot the graph
+ggplot(silhouette, aes(x = X2.max_k, y = avg.silhouette)) +
+  geom_point() +
+  geom_line() +
+  scale_x_continuous(breaks = seq(1, max_k, by = 1))
+```
+
+Le meilleur clustering est de 2 clusters.
+
+Ques se passe-t-il ?  
+Regardons la composition des clusters sur les différentes variables.  
+Pour cela, on recalcule la kmeans sur 2 clusters puis on affecte les clusters au dataframe d'origine.  
+```{r kmeans_2_clusters}
+#affectation de la kmeans
+clusters.final <- kmeans(fifa_data.scaled.minMax, 2, nstart = 100)
+cluster<-clusters.final$cluster
+fifa_with_cluster<-fifa_data.fillna %>% cbind(cluster)
+
+#calcul des stats
+stats<-fifa_with_cluster %>%select_if(is.numeric) %>% select(-ID) %>% 
+  group_by(cluster) %>%
+  summarise_all("mean")
+stats.reshaped<-reshape2::melt(stats, id.vars="cluster")
+
+# create the heatmap
+## palette
+hm.palette <-colorRampPalette(rev(brewer.pal(10, 'RdYlGn')),space='Lab')
+ggplot(data = stats.reshaped, aes(x = cluster, y =variable, fill = value)) +
+  scale_x_continuous(breaks = seq(1, 8, by = 1)) +
+  geom_tile() +
+  coord_equal() +
+  scale_fill_gradientn(colours = hm.palette(90)) +
+  theme_classic()
+```
+
+```{r count_by_position}
+fifa_with_cluster %>% 
+  group_by(cluster,PositionGroup) %>%
+  count()
+```
+
+
+On constate que la kmeans avec deux clusters distingue les gardiens des autres joueurs !  
+Est-ce que plus de clusters permettraient de distinguer toutes les catégories de joueurs ?  
+Quel pré-traitement de données pourrait-on appliquer ?  
+
